@@ -1,0 +1,174 @@
+#-*-coding:utf-8-*-
+'''
+'''
+import cv2
+import numpy as np
+import matplotlib.pylab as plt
+from scipy import sparse
+
+src = cv2.imread('/home/zch/PycharmProjects/untitled8/svm-for-white-blood-cell-master/images/EOSINOPHIL/_0_1414.jpeg')
+m, n, dims = src.shape
+
+downSample = 0          #对图像进行降采样
+scale = 0.5             # 降采样的比例
+patchSize = 15          # 公式(12)
+patchSizeQ = 3          # 公式(6)
+neighborMode = 0        # = 0 表示采用四邻域, = 1 表示采用8邻域
+isPostProcess = 1       # 是否进行中值滤波后处理
+
+if dims == 3:
+    if downSample == 1:
+        m = (m * scale).astype(np.uint8)
+        n = (n * scale).astype(np.uint8)
+        img_in = src.reshape((m, n))
+    else:
+        img_in = src
+
+
+cv2.imshow('src', src)
+
+
+def illumination(img_in, method):
+    if cmp(method, 'max_c') == 0:
+        t = img_in.max(2)
+    elif cmp(method, 'min_c') == 0:
+        t = img_in.min(2)
+    return t
+
+#Bright_pass_filter
+def filter_bpf(L_init, patchSize=15, patchSizeQ=3, neighborsMode=0):
+    '''
+L_init  根据通道得到最大亮度
+patchSize根据文章里得到的是 15 * 15
+pacthsizeQ 不会编默认修改，放在外面带入，默认设为3吧，随机
+    '''
+    #patchSizeQ = np.floor((L_init.max() - L_init.min()) / 32)
+    m, n = L_init.shape
+
+    if neighborMode == 0:
+        index_x = np.array([0, -1, 0, 1, 0])
+        index_y = np.array([-1, 0, 0, 0, 1])
+    elif neighborMode == 1:
+        index_x = np.array([-1, 0, 1, -1, 0, 1, -1, 0, 1])
+        index_y = np.array([-1, -1, -1, 0, 0, 0, 1, 1, 1])
+    level = 256
+
+    from scipy import sparse
+    data = np.array([1])
+    row = [1]
+    colum = [1]
+    t1 = m * n
+    t2 = level * level
+    Q_init = np.zeros((m * n, level * level), dtype=np.dtype('int8'))
+    #Q_init = Q_t.toarray()
+
+    for x in range(0, m):
+        for y in range(0, n):
+            for idx in range(0, len(index_x)):
+                k = (L_init[x, y] + 1).astype(np.int32)
+                l = (L_init[x + index_x[idx], y + index_y[idx]]).astype(np.int32)
+                Q_init[(x - 1) * n + y, (k - 1) * level + 1] = Q_init[(x - 1) * n + y, (k - 1) * level + 1] + 1
+    Q_1 = np.zeros((level, level))
+    for k in range(0, level):
+        for l in range(0, level):
+            Q_1[k, l] = sum((Q_init[:, (k - 1) * level + 1]))
+    cv2.imshow('Q 1 ', Q_1 / 255.)
+
+    #公式7        1:4
+    win = patchSizeQ
+    Q = np.zeros((level, level))
+    for k in range(0, level):
+        for l in range(0, level):
+            idx = np.arange(np.maximum(1, l - win), np.minimum(level, 1 + win) + 1)
+            Q[k, l] = sum(Q_1[k, idx]) / len(idx)
+
+    cv2.imshow('Q', Q / 255.)
+
+    #公式12
+    L_r = np.zeros(len(L_init))
+    for x in range(0, m):
+        for y in range(0, n):
+            idx_i = np.arange(np.maximum(1, x - patchSize), np.minimum(m, x + patchSize) + 1)
+            idx_j = np.arange(np.maximum(1, y - patchSize), np.minimum(n, y + patchSize) + 1)
+            neighbors = L_init[idx_i, idx_j]
+            U = (neighbors >= np.tile(L_init[x, y], (len(idx_i), len(idx_j))))
+            Q_neighbours = Q[L_init[x, y] + 1, neighbors.flatten(1) + 1]
+            Q_r = ((Q_neighbours.flatten(1) * U.flatten(1)).astype(np.double)) * (neighbors.flatten(1)).astype(np.double)
+            W = sum(Q_neighbours.flatten(1) * U.flatten(1))
+            L_r[x, y] = (sum(Q_r) / (W + (W[:] == 0) * 0.001)).astype(np.uint8)         #flatten可能不对，没看懂。
+
+    return L_r
+
+
+#Weight Historgram and CDF
+
+def weight_hist(L_lg, L_r):
+
+    #公式15和16
+    level = 256
+    maps = np.zeros((level, 1))
+    clv = np.zeros((level, 1))
+
+    sum_lg = sum(np.sum(L_lg, axis=0))
+
+    for k in range(0, level):
+        maps[k] = sum(np.sum(L_lg.astype(np.double) * (L_lg == k), axis=0)) / sum_lg
+
+    #公式17
+    for k in range(0, level):
+        if k == 1:
+            clv[k] = maps[k]
+        else:
+            clv[k] = clv[k - 1] + maps[k]
+    return clv, maps
+
+#Log Historgram
+def log_hist():
+    #直方图，看不懂,发现看了也看不懂
+    level = 256
+    cfz = np.zeros((level, 1))
+    sz = np.zeros((level, 1))
+    epsilon = 1
+
+    for z in range(0, 255):
+        sz[z + 1] = np.log(z + epsilon) + 0.01
+
+    sumz = np.sum(sz, axis=0)
+    for z in range(0, 255):
+        if z == 0:
+            cfz[z+1] = sz[z + 1]
+        else:
+            cfz[z+1] = cfz[z] + sz[z + 1]
+    return cfz, sz
+
+#直方图规定化
+def filter_BLT(L_r, clv, cfz):
+
+    m, n = L_r.shape
+    L_m = L_r
+
+    for x in range(0, m):
+        for y in range(0, n):
+            tmp = clv[L_r[x, y] + 1]
+            for zv in range(0, 256):
+                if cfz[zv] >= tmp:
+                    break
+            L_m[x, y] = zv - 1
+    return L_m
+
+
+
+
+
+
+
+#初始估计亮度：亮通道初步估计
+L_init = illumination(src, 'max_c')
+cv2.imshow('L_init', L_init)
+
+#patchSizeQ = np.floor((L_init.max() - L_init.min()) / 32)
+#图像大小初始化
+L_r = filter_bpf(L_init, patchSize, patchSizeQ, neighborMode)
+
+cv2.imshow('L_r', L_r)
+cv2.waitKey(0)
