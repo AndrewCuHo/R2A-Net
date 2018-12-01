@@ -1,0 +1,137 @@
+import tensorflow as tf
+from tensorflow.python.platform import gfile
+from sklearn import model_selection
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.manifold import TSNE
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+import numpy as np
+import matplotlib.pyplot as plt
+import pickle
+import collections
+import itertools
+import time
+import os
+import re
+
+model_dir = './'
+images_dir = '/'
+
+def create_graph():
+    with gfile.FastGFile(os.path.join(model_dir, 'R2A.pb'), 'rb') as f:
+        graph_def = tf.GraphDef()
+        graph_def.ParseFromString(f.read())
+        _ = tf.import_graph_def(graph_def, name='')
+
+
+def extract_features(list_images):
+    nb_features = 1000
+    features = np.empty((len(list_images), nb_features))
+    labels = []
+    create_graph()
+    with tf.Session() as sess:
+        next_to_last_tensor = sess.graph.get_tensor_by_name('fc12')
+        for ind, image in enumerate(list_images):
+            imlabel = image.split('/')[1]
+            if not gfile.Exists(image):
+                tf.logging.fatal('File does not exist %s', image)
+
+            image_data = gfile.FastGFile(image, 'rb').read()
+            predictions = sess.run(next_to_last_tensor, {'DecodeJpeg/contents:0': image_data})
+            features[ind, :] = np.squeeze(predictions)
+            labels.append(imlabel)
+
+    return features, labels
+
+
+
+def plot_features(feature_labels, t_sne_features):
+    plt.figure(figsize=(9, 9), dpi=100)
+
+    uniques = {x: labels.count(x) for x in feature_labels}
+    od = collections.OrderedDict(sorted(uniques.items()))
+
+    colors = itertools.cycle(["r", "b", "g", "c", "m", "y",
+                              "slategray", "plum", "cornflowerblue",
+                              "hotpink", "darkorange", "forestgreen",
+                              "tan", "firebrick", "sandybrown"])
+    n = 0
+    for label in od:
+        count = od[label]
+        m = n + count
+        plt.scatter(t_sne_features[n:m, 0], t_sne_features[n:m, 1], c=next(colors), s=10, edgecolors='none')
+        c = (m + n) // 2
+        plt.annotate(label, (t_sne_features[c, 0], t_sne_features[c, 1]))
+        n = m
+
+    plt.show()
+
+
+def plot_confusion_matrix(y_true, y_pred, matrix_title):
+    plt.figure(figsize=(9, 9), dpi=100)
+    cm_array = confusion_matrix(y_true, y_pred)
+    plt.imshow(cm_array[:-1, :-1], interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title(matrix_title, fontsize=16)
+
+    cbar = plt.colorbar(fraction=0.046, pad=0.04)
+    cbar.set_label('Number of images', rotation=270, labelpad=30, fontsize=12)
+    true_labels = np.unique(y_true)
+    pred_labels = np.unique(y_pred)
+    xtick_marks = np.arange(len(true_labels))
+    ytick_marks = np.arange(len(pred_labels))
+    plt.xticks(xtick_marks, true_labels, rotation=90)
+    plt.yticks(ytick_marks, pred_labels)
+    plt.tight_layout()
+    plt.ylabel('True label', fontsize=14)
+    plt.xlabel('Predicted label', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+def run_classifier(clfr, x_train_data, y_train_data, x_test_data, y_test_data, acc_str, matrix_header_str):
+    start_time = time.time()
+    clfr.fit(x_train_data, y_train_data)
+    y_pred = clfr.predict(x_test_data)
+    plot_confusion_matrix(y_test_data, y_pred, matrix_header_str)
+if os.path.exists('features'):
+    features = pickle.load(open('features', 'rb'))
+    labels = pickle.load(open('labels', 'rb'))
+else:
+    dir_list = [x[0] for x in os.walk(images_dir)]
+    dir_list = dir_list[1:]
+    list_images = []
+    for image_sub_dir in dir_list:
+        sub_dir_images = [image_sub_dir + '/' + f for f in os.listdir(image_sub_dir) if re.search('png', f)]
+        list_images.extend(sub_dir_images)
+    features, labels = extract_features(list_images)
+
+    # save, so they can be used without re-running the last step which can be quite long
+    pickle.dump(features, open('features', 'wb'))
+    pickle.dump(labels, open('labels', 'wb'))
+if os.path.exists('tsne_features.npz'):
+    tsne_features = np.load('tsne_features.npz')['tsne_features']
+else:
+    tsne_features = TSNE().fit_transform(features)
+    np.savez('tsne_features', tsne_features=tsne_features)
+plot_features(labels, tsne_features)
+X_train, X_test, y_train, y_test = model_selection.train_test_split(features, labels, test_size=0.2, random_state=42)
+clf = LinearSVC()
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-SVM Accuracy: {0:0.1f}%", "SVM Confusion matrix")
+clf = ExtraTreesClassifier(n_jobs=50,  n_estimators=100, criterion='gini', min_samples_split=10,
+                           max_features=50, max_depth=40, min_samples_leaf=4)
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-ET Accuracy: {0:0.1f}%", "Extra Trees Confusion matrix")
+clf = RandomForestClassifier(n_jobs=50, criterion='entropy', n_estimators=70, min_samples_split=5)
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-RF Accuracy: {0:0.1f}%", "Random Forest Confusion matrix")
+clf = KNeighborsClassifier(n_neighbors=1, n_jobs=50)
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-KNN Accuracy: {0:0.1f}%",
+               "K-Nearest Neighbor Confusion matrix")
+clf = GaussianNB()
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-GNB Accuracy: {0:0.1f}%",
+               "Gaussian Naive Bayes Confusion matrix")
+print('Linear Discriminant Analysis Classifier starting ...')
+clf = LinearDiscriminantAnalysis()
+run_classifier(clf, X_train, y_train, X_test, y_test, "CNN-LDA Accuracy: {0:0.1f}%",
+               "Linear Discriminant Analysis Confusion matrix")
